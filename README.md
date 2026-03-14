@@ -52,6 +52,17 @@ npm.cmd run build
 
 After building, start FastAPI again. If `frontend/dist` exists, the backend will serve the compiled React app.
 
+## Docker Deployment
+
+Build and run the full app with Docker:
+
+```bash
+docker build -t cuteoff-analyzer .
+docker run --rm -p 8000:7860 cuteoff-analyzer
+```
+
+The container builds the React frontend, copies `frontend/dist` into the image, and starts the FastAPI app on port `7860` by default.
+
 ## Tests
 
 ```bash

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-import tempfile
+import shutil
 
 import openpyxl
 
@@ -36,45 +36,44 @@ def build_parse_result() -> ParseResult:
     )
 
 
+def make_work_dir(test_name: str) -> Path:
+    work_dir = Path("backend") / "tmp" / "test-artifacts" / test_name
+    shutil.rmtree(work_dir, ignore_errors=True)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    return work_dir
+
+
 def test_write_excel_creates_expected_headers_and_formats() -> None:
-    base_dir = Path("backend") / "tmp" / "test-artifacts"
-    base_dir.mkdir(parents=True, exist_ok=True)
+    output_path = make_work_dir("excel-headers") / "cutoffs.xlsx"
+    parse_result = build_parse_result()
 
-    with tempfile.TemporaryDirectory(dir=base_dir) as temp_dir:
-        output_path = Path(temp_dir) / "cutoffs.xlsx"
-        parse_result = build_parse_result()
+    summary = write_excel(parse_result, output_path)
+    workbook = openpyxl.load_workbook(output_path)
+    worksheet = workbook["CAP Round I Cutoffs"]
 
-        summary = write_excel(parse_result, output_path)
-        workbook = openpyxl.load_workbook(output_path)
-        worksheet = workbook["CAP Round I Cutoffs"]
-
-        assert summary.row_count == 1
-        assert worksheet.max_column == len(COLUMN_ORDER)
-        assert [worksheet.cell(row=1, column=index).value for index in range(1, len(COLUMN_ORDER) + 1)] == [
-            column[0] for column in COLUMN_ORDER
-        ]
-        assert worksheet["A2"].value == 1
-        assert worksheet["B2"].value == "01002"
-        assert worksheet["B2"].number_format == "@"
-        assert worksheet["J2"].number_format == "0.0000000"
-        assert worksheet["AS2"].value == 7401
-        assert worksheet["AC2"].value is None
-        assert worksheet.freeze_panes == "A2"
-        assert worksheet.row_dimensions[1].height == 40
-        assert worksheet.row_dimensions[2].height == 18
-        assert worksheet["A1"].fill.fgColor.rgb.endswith("BDD7EE")
-        assert worksheet["I1"].fill.fgColor.rgb.endswith("C6EFCE")
+    assert summary.row_count == 1
+    assert worksheet.max_column == len(COLUMN_ORDER)
+    assert [worksheet.cell(row=1, column=index).value for index in range(1, len(COLUMN_ORDER) + 1)] == [
+        column[0] for column in COLUMN_ORDER
+    ]
+    assert worksheet["A2"].value == 1
+    assert worksheet["B2"].value == "01002"
+    assert worksheet["B2"].number_format == "@"
+    assert worksheet["J2"].number_format == "0.0000000"
+    assert worksheet["AS2"].value == 7401
+    assert worksheet["AC2"].value is None
+    assert worksheet.freeze_panes == "A2"
+    assert worksheet.row_dimensions[1].height == 40
+    assert worksheet.row_dimensions[2].height == 18
+    assert worksheet["A1"].fill.fgColor.rgb.endswith("BDD7EE")
+    assert worksheet["I1"].fill.fgColor.rgb.endswith("C6EFCE")
 
 
 def test_write_excel_creates_how_to_use_sheet() -> None:
-    base_dir = Path("backend") / "tmp" / "test-artifacts"
-    base_dir.mkdir(parents=True, exist_ok=True)
+    output_path = make_work_dir("excel-guide") / "guide.xlsx"
+    write_excel(build_parse_result(), output_path)
 
-    with tempfile.TemporaryDirectory(dir=base_dir) as temp_dir:
-        output_path = Path(temp_dir) / "guide.xlsx"
-        write_excel(build_parse_result(), output_path)
-
-        workbook = openpyxl.load_workbook(output_path)
-        guide_sheet = workbook["How to Use"]
-        assert "HOW TO USE THIS FILE FOR STUDENT COUNSELING" in guide_sheet["A1"].value
-        assert "GOBCS  = OBC (Other Backward Class)" in guide_sheet["A1"].value
+    workbook = openpyxl.load_workbook(output_path)
+    guide_sheet = workbook["How to Use"]
+    assert "HOW TO USE THIS FILE FOR STUDENT COUNSELING" in guide_sheet["A1"].value
+    assert "GOBCS  = OBC (Other Backward Class)" in guide_sheet["A1"].value

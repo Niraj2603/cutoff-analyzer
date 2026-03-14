@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import re
+from itertools import chain, islice
+from operator import length_hint
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable
@@ -485,27 +487,29 @@ def _emit_progress(
     )
 
 
-def parse_text_pages(
-    page_texts: Iterable[str],
-    progress_callback: ProgressCallback | None = None,
-    source_name: str | None = None,
-) -> ParseResult:
-    texts = list(page_texts)
-    preview_text = "\n".join(texts[:3])
+def _build_parser_state(preview_text: str, source_name: str | None = None) -> ParserState:
     round_label, academic_year, sheet_name, output_filename = detect_round_and_year(
         preview_text,
         source_name=source_name,
     )
-    state = ParserState(
+    return ParserState(
         round_label=round_label,
         academic_year=academic_year,
         sheet_name=sheet_name,
         output_filename=output_filename,
     )
-    total_pages = len(texts)
+
+
+def _parse_page_texts(
+    page_texts: Iterable[str],
+    state: ParserState,
+    progress_callback: ProgressCallback | None = None,
+    total_pages: int = 0,
+) -> ParseResult:
+    total_pages = max(total_pages, 0)
 
     try:
-        for page_index, text in enumerate(texts, start=1):
+        for page_index, text in enumerate(page_texts, start=1):
             for raw_line in (text or "").splitlines():
                 raw_line = raw_line.replace("\xa0", " ").rstrip()
                 line = normalize_line(raw_line)
@@ -602,6 +606,39 @@ def parse_text_pages(
         raise
 
 
+def parse_text_pages(
+    page_texts: Iterable[str],
+    progress_callback: ProgressCallback | None = None,
+    source_name: str | None = None,
+    *,
+    total_pages: int | None = None,
+    preview_text: str | None = None,
+) -> ParseResult:
+    iterator = iter(page_texts)
+    preview_pages: list[str] = []
+
+    if preview_text is None:
+        preview_pages = list(islice(iterator, 3))
+        preview_text = "\n".join(preview_pages)
+
+    if total_pages is None:
+        total_pages = len(page_texts) if hasattr(page_texts, "__len__") else 0
+        if not total_pages:
+            total_pages = len(preview_pages) + length_hint(iterator, 0)
+
+    state = _build_parser_state(preview_text, source_name=source_name)
+    return _parse_page_texts(
+        chain(preview_pages, iterator),
+        state,
+        progress_callback=progress_callback,
+        total_pages=total_pages,
+    )
+
+
+def _extract_page_text(page: pdfplumber.page.Page) -> str:
+    return page.extract_text(layout=True, x_tolerance=1, y_tolerance=3) or ""
+
+
 def parse_pdf(
     pdf_path: str | Path,
     progress_callback: ProgressCallback | None = None,
@@ -610,13 +647,22 @@ def parse_pdf(
 ) -> ParseResult:
     pdf_path = Path(pdf_path)
     with pdfplumber.open(str(pdf_path)) as pdf:
-        pages = pdf.pages[: max_pages or len(pdf.pages)]
-        page_texts = [
-            page.extract_text(layout=True, x_tolerance=1, y_tolerance=3) or ""
-            for page in pages
-        ]
-    return parse_text_pages(
-        page_texts,
-        progress_callback=progress_callback,
-        source_name=source_name or pdf_path.name,
-    )
+        total_pdf_pages = len(pdf.pages)
+        total_pages = min(max_pages or total_pdf_pages, total_pdf_pages)
+        preview_count = min(3, total_pages)
+        preview_pages = [_extract_page_text(pdf.pages[index]) for index in range(preview_count)]
+
+        def page_texts() -> Iterable[str]:
+            for index in range(total_pages):
+                if index < preview_count:
+                    yield preview_pages[index]
+                    continue
+                yield _extract_page_text(pdf.pages[index])
+
+        return parse_text_pages(
+            page_texts(),
+            progress_callback=progress_callback,
+            source_name=source_name or pdf_path.name,
+            total_pages=total_pages,
+            preview_text="\n".join(preview_pages),
+        )

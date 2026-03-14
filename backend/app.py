@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import logging
+import os
+import re
 import shutil
 import threading
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
@@ -20,14 +24,51 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 JOBS_DIR = BASE_DIR / "backend" / "tmp" / "jobs"
 FRONTEND_DIST_DIR = BASE_DIR / "frontend" / "dist"
 JOB_RETENTION_SECONDS = 24 * 60 * 60
+MAX_UPLOAD_BYTES = max(int(os.getenv("MAX_UPLOAD_BYTES", 25 * 1024 * 1024)), 1)
+UPLOAD_CHUNK_SIZE = max(int(os.getenv("UPLOAD_CHUNK_SIZE", 1024 * 1024)), 1024)
+MAX_WORKERS = max(int(os.getenv("MAX_WORKERS", 2)), 1)
+MAX_QUEUED_JOBS = max(int(os.getenv("MAX_QUEUED_JOBS", 8)), 0)
+CLEANUP_INTERVAL_SECONDS = max(int(os.getenv("CLEANUP_INTERVAL_SECONDS", 30 * 60)), 1)
+SAFE_FILENAME_RE = re.compile(r"[^A-Za-z0-9_-]+")
+GENERIC_PARSE_ERROR = "Unable to process the uploaded PDF."
+PARTIAL_RESULT_ERROR = "Processing stopped before completion. A partial workbook is available."
+INVALID_PDF_ERROR = "Uploaded file does not appear to be a valid PDF."
+QUEUE_FULL_ERROR = "The service is busy. Please try again later."
+logger = logging.getLogger(__name__)
 JOBS_LOCK = threading.Lock()
 JOBS: dict[str, dict[str, Any]] = {}
+JOB_EXECUTOR: ThreadPoolExecutor | None = None
+CLEANUP_STOP_EVENT = threading.Event()
+CLEANUP_THREAD: threading.Thread | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    global JOB_EXECUTOR
+    global CLEANUP_THREAD
+
     cleanup_stale_jobs()
-    yield
+    JOB_EXECUTOR = ThreadPoolExecutor(max_workers=MAX_WORKERS, thread_name_prefix="cutoff-job")
+    CLEANUP_STOP_EVENT.clear()
+    if CLEANUP_THREAD is None or not CLEANUP_THREAD.is_alive():
+        CLEANUP_THREAD = threading.Thread(
+            target=cleanup_loop,
+            args=(CLEANUP_STOP_EVENT,),
+            daemon=True,
+            name="cutoff-cleanup",
+        )
+        CLEANUP_THREAD.start()
+
+    try:
+        yield
+    finally:
+        CLEANUP_STOP_EVENT.set()
+        if CLEANUP_THREAD is not None and CLEANUP_THREAD.is_alive():
+            CLEANUP_THREAD.join(timeout=1)
+        CLEANUP_THREAD = None
+        if JOB_EXECUTOR is not None:
+            JOB_EXECUTOR.shutdown(wait=False, cancel_futures=False)
+            JOB_EXECUTOR = None
 
 
 app = FastAPI(
@@ -50,7 +91,59 @@ def ensure_jobs_dir() -> None:
     JOBS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def cleanup_loop(stop_event: threading.Event) -> None:
+    while not stop_event.wait(CLEANUP_INTERVAL_SECONDS):
+        cleanup_stale_jobs()
+
+
+def sanitize_filename(filename: str) -> str:
+    basename = filename.replace("\\", "/").split("/")[-1].strip()
+    if not basename:
+        raise HTTPException(status_code=400, detail="Please upload a valid MHT-CET CAP Round PDF.")
+
+    raw_path = Path(basename)
+    if raw_path.suffix.lower() != ".pdf":
+        raise HTTPException(status_code=400, detail="Please upload a valid MHT-CET CAP Round PDF.")
+
+    safe_stem = SAFE_FILENAME_RE.sub("_", raw_path.stem).strip("._-")
+    if not safe_stem:
+        safe_stem = "upload"
+    return f"{safe_stem}.pdf"
+
+
+def build_job_file_path(job_dir: Path, filename: str) -> Path:
+    resolved_job_dir = job_dir.resolve()
+    candidate = (resolved_job_dir / filename).resolve()
+    if candidate.parent != resolved_job_dir:
+        raise HTTPException(status_code=400, detail="Invalid upload filename.")
+    return candidate
+
+
+def get_job_counts() -> tuple[int, int]:
+    with JOBS_LOCK:
+        return get_job_counts_locked()
+
+
+def get_job_counts_locked() -> tuple[int, int]:
+    queued_jobs = sum(1 for job in JOBS.values() if job["status"] in {"uploading", "queued"})
+    running_jobs = sum(1 for job in JOBS.values() if job["status"] == "processing")
+    return queued_jobs, running_jobs
+
+
+def remove_job(job_id: str) -> None:
+    with JOBS_LOCK:
+        job = JOBS.pop(job_id, None)
+
+    if not job:
+        return
+
+    job_dir = job.get("job_dir")
+    if job_dir:
+        shutil.rmtree(job_dir, ignore_errors=True)
+
+
 def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
+    queued_jobs, running_jobs = get_job_counts()
     return {
         "job_id": job["job_id"],
         "status": job["status"],
@@ -65,6 +158,8 @@ def serialize_job(job: dict[str, Any]) -> dict[str, Any]:
         "output_filename": job["output_filename"],
         "partial_available": job["partial_available"],
         "error": job["error"],
+        "queued_jobs": queued_jobs,
+        "running_jobs": running_jobs,
     }
 
 
@@ -199,9 +294,24 @@ def process_job(job_id: str, pdf_path: Path, original_filename: str) -> None:
             error=None,
         )
     except PartialParseError as exc:
+        logger.warning("Job %s hit a recoverable parse error: %s", job_id, exc)
         partial = exc.partial_result
         if partial and partial.rows:
-            write_excel(partial, partial_output_path)
+            try:
+                write_excel(partial, partial_output_path)
+            except Exception:  # pragma: no cover
+                logger.exception("Job %s failed while writing a partial workbook", job_id)
+                set_job_state(
+                    job_id,
+                    status="error",
+                    progress_pct=100,
+                    message=GENERIC_PARSE_ERROR,
+                    estimated_time_remaining_seconds=0,
+                    partial_available=False,
+                    error=GENERIC_PARSE_ERROR,
+                )
+                return
+
             set_job_state(
                 job_id,
                 status="error",
@@ -216,7 +326,7 @@ def process_job(job_id: str, pdf_path: Path, original_filename: str) -> None:
                 output_filename=partial_output_path.name,
                 output_path=str(partial_output_path),
                 partial_available=True,
-                error=str(exc),
+                error=PARTIAL_RESULT_ERROR,
             )
             return
 
@@ -224,56 +334,93 @@ def process_job(job_id: str, pdf_path: Path, original_filename: str) -> None:
             job_id,
             status="error",
             progress_pct=100,
-            message="Unable to parse the uploaded PDF.",
+            message=GENERIC_PARSE_ERROR,
             estimated_time_remaining_seconds=0,
             partial_available=False,
-            error=str(exc),
+            error=GENERIC_PARSE_ERROR,
         )
     except Exception as exc:  # pragma: no cover
+        logger.exception("Job %s failed unexpectedly", job_id)
         set_job_state(
             job_id,
             status="error",
             progress_pct=100,
-            message="Unable to parse the uploaded PDF.",
+            message=GENERIC_PARSE_ERROR,
             estimated_time_remaining_seconds=0,
             partial_available=False,
-            error=str(exc),
+            error=GENERIC_PARSE_ERROR,
         )
 
 
 def start_job(job_id: str, pdf_path: Path, original_filename: str) -> None:
-    worker = threading.Thread(
-        target=process_job,
-        args=(job_id, pdf_path, original_filename),
-        daemon=True,
-        name=f"cutoff-job-{job_id}",
-    )
-    worker.start()
+    if JOB_EXECUTOR is None:
+        raise RuntimeError("Job executor is not available.")
+    JOB_EXECUTOR.submit(process_job, job_id, pdf_path, original_filename)
+
+
+async def stream_upload_to_disk(file: UploadFile, destination: Path) -> int:
+    total_bytes = 0
+    saw_header = False
+
+    with destination.open("wb") as output_file:
+        while True:
+            chunk = await file.read(UPLOAD_CHUNK_SIZE)
+            if not chunk:
+                break
+
+            if not saw_header:
+                saw_header = True
+                if b"%PDF-" not in chunk[:1024]:
+                    raise HTTPException(status_code=400, detail=INVALID_PDF_ERROR)
+
+            total_bytes += len(chunk)
+            if total_bytes > MAX_UPLOAD_BYTES:
+                raise HTTPException(
+                    status_code=413,
+                    detail=f"Uploaded PDF exceeds the {MAX_UPLOAD_BYTES // (1024 * 1024)} MB limit.",
+                )
+            output_file.write(chunk)
+
+    if total_bytes == 0:
+        raise HTTPException(status_code=400, detail=INVALID_PDF_ERROR)
+
+    return total_bytes
 
 
 @app.post("/api/upload")
 async def upload_pdf(file: UploadFile = File(...)) -> JSONResponse:
-    if not file.filename or not file.filename.lower().endswith(".pdf"):
+    if not file.filename:
         raise HTTPException(status_code=400, detail="Please upload a valid MHT-CET CAP Round PDF.")
 
     ensure_jobs_dir()
+    safe_filename = sanitize_filename(file.filename)
     job_id = uuid.uuid4().hex[:12]
     job_dir = JOBS_DIR / job_id
-    job_dir.mkdir(parents=True, exist_ok=True)
-    input_path = job_dir / file.filename
-
-    contents = await file.read()
-    input_path.write_bytes(contents)
-
-    job = new_job(job_id, file.filename)
-    job["input_path"] = str(input_path)
+    job = new_job(job_id, safe_filename)
+    job["status"] = "uploading"
+    job["message"] = "Uploading PDF..."
     job["job_dir"] = str(job_dir)
 
     with JOBS_LOCK:
+        queued_jobs, running_jobs = get_job_counts_locked()
+        if queued_jobs + running_jobs >= MAX_WORKERS + MAX_QUEUED_JOBS:
+            raise HTTPException(status_code=429, detail=QUEUE_FULL_ERROR)
         JOBS[job_id] = job
 
-    start_job(job_id, input_path, file.filename)
-    return JSONResponse({"job_id": job_id, "status": "queued"})
+    try:
+        job_dir.mkdir(parents=True, exist_ok=True)
+        input_path = build_job_file_path(job_dir, safe_filename)
+        set_job_state(job_id, input_path=str(input_path))
+        await stream_upload_to_disk(file, input_path)
+        set_job_state(job_id, status="queued", message="Queued for processing.")
+        logger.info("Accepted upload for job %s as %s", job_id, safe_filename)
+        start_job(job_id, input_path, safe_filename)
+        return JSONResponse({"job_id": job_id, "status": "queued"})
+    except Exception:
+        remove_job(job_id)
+        raise
+    finally:
+        await file.close()
 
 
 @app.get("/api/status/{job_id}")

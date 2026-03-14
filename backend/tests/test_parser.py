@@ -1,6 +1,9 @@
 from __future__ import annotations
 
-from backend.parser import extract_status_details, is_noise, parse_text_pages
+from pathlib import Path
+
+import backend.parser as parser_module
+from backend.parser import extract_status_details, is_noise, parse_pdf, parse_text_pages
 
 
 def test_extract_status_details_variants() -> None:
@@ -97,3 +100,80 @@ def test_parse_text_pages_handles_realistic_stage_header_and_wrapped_category() 
     assert row.data["TFWS"]["rank"] == 7401
     assert row.data["EWS"]["pct"] == 96.0638523
     assert result.ignored_categories == ["PWDROBCS"]
+
+
+def test_parse_text_pages_accepts_iterators() -> None:
+    pages = iter(
+        [
+            "\n".join(
+                [
+                    "Cut Off List for Maharashtra & Minority Seats of CAP Round I 2025-26",
+                    "01002 - Government College of Engineering, Amravati",
+                    "0100224210 - Computer Science and Engineering",
+                    "Status: Government Home University : SGBAU",
+                    "State Level",
+                    "GOPENS",
+                    "9196",
+                    "(97.3737374)",
+                ]
+            )
+        ]
+    )
+
+    result = parse_text_pages(pages, source_name="CAP_Round_I_2025-26.pdf")
+
+    assert result.rows_found == 1
+    assert result.rows[0].data["GOPENS"]["rank"] == 9196
+
+
+def test_parse_pdf_streams_page_extraction(monkeypatch) -> None:
+    sequence: list[str] = []
+    page_text = "\n".join(
+        [
+            "Cut Off List for Maharashtra & Minority Seats of CAP Round I 2025-26",
+            "01002 - Government College of Engineering, Amravati",
+            "0100224210 - Computer Science and Engineering",
+            "Status: Government Home University : SGBAU",
+            "State Level",
+            "GOPENS",
+            "9196",
+            "(97.3737374)",
+        ]
+    )
+
+    class FakePage:
+        def __init__(self, index: int) -> None:
+            self.index = index
+
+        def extract_text(self, layout=True, x_tolerance=1, y_tolerance=3):  # noqa: ANN001
+            sequence.append(f"extract-{self.index}")
+            return page_text
+
+    class FakePdf:
+        def __init__(self) -> None:
+            self.pages = [FakePage(index) for index in range(1, 6)]
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc, tb):  # noqa: ANN001
+            return False
+
+    monkeypatch.setattr(parser_module.pdfplumber, "open", lambda _: FakePdf())
+
+    progress_events: list[int] = []
+    result = parse_pdf(
+        Path("fake.pdf"),
+        progress_callback=lambda event: (
+            progress_events.append(event["pages_processed"]),
+            sequence.append(f"progress-{event['pages_processed']}"),
+        ),
+        source_name="CAP_Round_I_2025-26.pdf",
+    )
+
+    assert result.rows_found == 5
+    assert progress_events == [1, 2, 3, 4, 5]
+    assert sequence.index("progress-1") < sequence.index("extract-4")
+    assert sequence.index("progress-3") < sequence.index("extract-4")
+    assert sequence.index("extract-4") < sequence.index("progress-4")
+    assert sequence.index("extract-5") < sequence.index("progress-5")

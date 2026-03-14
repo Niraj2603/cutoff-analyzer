@@ -2,6 +2,7 @@ __pycache__/
 .pytest_cache/
 .pytest-cache/
 .pytest-tmp/
+.pytest-tmp-run*/
 pytest-cache-files-*/
 *.pyc
 *.pyo
