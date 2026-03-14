@@ -1,0 +1,31 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #102034;
+  background:
+    radial-gradient(circle at top left, rgba(241, 199, 107, 0.32), transparent 28%),
+    radial-gradient(circle at top right, rgba(55, 136, 123, 0.25), transparent 25%),
+    linear-gradient(180deg, #f7fbff 0%, #eef6fb 44%, #fcf8ef 100%);
+  font-family: "Verdana", "Trebuchet MS", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: #102034;
+}
+
+a {
+  color: inherit;
+}
+
+#root {
+  min-height: 100vh;
+}

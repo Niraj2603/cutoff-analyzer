@@ -1,0 +1,14 @@
+__pycache__/
+.pytest_cache/
+.pytest-cache/
+.pytest-tmp/
+pytest-cache-files-*/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+backend/tmp/
+frontend/node_modules/
+frontend/dist/
+*.xlsx

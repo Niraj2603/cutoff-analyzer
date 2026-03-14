@@ -1,0 +1,71 @@
+# MHT-CET Cutoff PDF to Counseling Excel Converter
+
+This project converts Maharashtra CAP round cutoff PDFs into a counseling-ready Excel workbook for educational counselors. It includes a FastAPI backend for PDF parsing and workbook generation, and a React + Tailwind frontend for upload, progress tracking, and download.
+
+## Project Structure
+
+```text
+backend/
+  app.py
+  parser.py
+  excel_writer.py
+  city_district_map.py
+  requirements.txt
+  requirements-dev.txt
+  tests/
+frontend/
+  src/
+    App.jsx
+    UploadSection.jsx
+    ProgressSection.jsx
+    DownloadSection.jsx
+```
+
+## Backend Setup
+
+```bash
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r backend/requirements-dev.txt
+uvicorn backend.app:app --reload
+```
+
+The API will be available at `http://127.0.0.1:8000`.
+
+## Frontend Setup
+
+```bash
+cd frontend
+npm.cmd install
+npm.cmd run dev
+```
+
+The frontend will run at `http://127.0.0.1:5173` and proxy API requests to the FastAPI backend.
+
+## Production Build
+
+```bash
+cd frontend
+npm.cmd install
+npm.cmd run build
+```
+
+After building, start FastAPI again. If `frontend/dist` exists, the backend will serve the compiled React app.
+
+## Tests
+
+```bash
+pytest backend/tests
+```
+
+## Real PDF Validation
+
+1. Place a real MHT-CET CAP cutoff PDF somewhere inside the workspace.
+2. Run a first-pass parse against the first 10 pages before full conversion.
+3. Confirm at least 5 complete college/branch rows, then run the full conversion.
+
+## Notes
+
+- The parser uses `pdfplumber`, not `PyPDF2`.
+- Unsupported categories that are not part of the counseling workbook layout are parsed for robustness and omitted from the Excel export.
+- Missing cutoff cells remain blank in the workbook.
