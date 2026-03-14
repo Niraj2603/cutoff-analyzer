@@ -1,3 +1,9 @@
+---
+title: Cuteoff Analyzer
+sdk: docker
+app_port: 7860
+---
+
 # MHT-CET Cutoff PDF to Counseling Excel Converter
 
 This project converts Maharashtra CAP round cutoff PDFs into a counseling-ready Excel workbook for educational counselors. It includes a FastAPI backend for PDF parsing and workbook generation, and a React + Tailwind frontend for upload, progress tracking, and download.
@@ -62,6 +68,17 @@ docker run --rm -p 8000:7860 cuteoff-analyzer
 ```
 
 The container builds the React frontend, copies `frontend/dist` into the image, and starts the FastAPI app on port `7860` by default.
+
+## Hugging Face Spaces via GitHub
+
+If you want Hugging Face to build and host the app for you, keep this repo on GitHub and use the included GitHub Actions workflow.
+
+1. Create a new Hugging Face Space and choose `Docker` as the SDK.
+2. In your GitHub repository, add a secret named `HF_TOKEN`.
+3. In your GitHub repository, add variables named `HF_USERNAME` and `HF_SPACE_NAME`.
+4. Push to the `main` branch. The workflow will mirror the repo to your Space.
+
+The container build happens on Hugging Face, not on your laptop.
 
 ## Tests
 
